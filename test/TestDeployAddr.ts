@@ -1,40 +1,26 @@
 import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import { expect } from "chai";
 import hre from "hardhat";
-import { getAddress } from "viem";
 
 describe("Gnosis Safe Address Determinism", function () {
-  // fork mainnet ethereum (all contracts already exist, no need to deploy anything)
-  // mock HARDHAT_DEPLOYER_ADDR (from .env)
   async function setupFixture() {
-    console.log("Setting up fixture...");
     const deployerAddr = process.env.HARDHAT_DEPLOYER_ADDR as `0x${string}`;
     const multisigPolyAddr = process.env
       .HARDHAT_MULTISIG_POLY_ADDR as `0x${string}`;
     const safeProxyAddr = process.env.HARDHAT_SAFE_PROXY_ADDR as `0x${string}`;
     const singletonAddr = process.env
       .HARDHAT_SAFE_SINGLETON_ADDR as `0x${string}`;
-
     const initializerData = process.env
       .HARDHAT_INITIALIZER_DATA as `0x${string}`;
-
-    /* Impersonate the deployer of the original multisig you are wanting to replicate on another chain */
-    await hre.network.provider.request({
-      method: "hardhat_impersonateAccount",
-      params: [deployerAddr],
-    });
-
+    await impersonateAccount(deployerAddr);
     const publicClient = await hre.viem.getPublicClient();
     const [fromWalletClient, toWalletClient] =
       await hre.viem.getWalletClients();
-
-    let safeProxyContract = await hre.viem.getContractAt(
+    const safeProxyContract = await hre.viem.getContractAt(
       "GnosisSafeProxyFactory",
       safeProxyAddr,
       { walletClient: fromWalletClient }
     );
-    console.log("Ending fixture setup...");
-
     return {
       deployerAddr,
       multisigPolyAddr,
@@ -48,60 +34,80 @@ describe("Gnosis Safe Address Determinism", function () {
     };
   }
 
-  // call using mocked HARDHAT_DEPLOYER_ADDR to HARDHAT_SAFE_PROXY_ADDR with input data HARDHAT_INPUT_DATA
-  describe("Run the tests", function () {
-    it("send txn and confirm deployed address", async function () {
-      console.log("Running test...");
-      const {
-        deployerAddr,
-        multisigPolyAddr,
-        safeProxyAddr,
-        singletonAddr,
-        initializerData,
-        publicClient,
-        fromWalletClient,
-        toWalletClient,
-        safeProxyContract,
-      } = await loadFixture(setupFixture);
+  it("send txn and confirm deployed address", async function () {
+    const {
+      multisigPolyAddr,
+      singletonAddr,
+      initializerData,
+      publicClient,
+      safeProxyContract,
+    } = await loadFixture(setupFixture);
 
-      const contractBefore = await publicClient.getBytecode({
-        address: multisigPolyAddr,
-      });
-      console.log("Contract before:", contractBefore);
-      expect(contractBefore).to.equal(undefined);
+    const contractBefore = await getBytecode(
+      multisigPolyAddr,
+      "Contract before"
+    );
+    expect(contractBefore).to.equal(undefined);
 
-      const hash = await safeProxyContract.write.createProxyWithNonce([
-        singletonAddr,
-        initializerData,
-        1697154183832n,
-      ]);
+    const hash = await createProxyWithNonce(
+      safeProxyContract,
+      singletonAddr,
+      initializerData
+    );
+    const deployMultisigWalletTxReceipt = await waitForTransactionReceipt(
+      publicClient,
+      hash
+    );
 
-      console.log("Deploying multisig wallet...", hash);
+    const firstLogAddress = getFirstLogAddress(deployMultisigWalletTxReceipt);
+    expect(firstLogAddress.toLowerCase()).to.equal(
+      multisigPolyAddr.toLowerCase()
+    );
 
-      const deployMultisigWalletTxReceipt =
-        await publicClient.waitForTransactionReceipt({ hash });
-
-      const logs = deployMultisigWalletTxReceipt.logs;
-
-      if (logs.length > 0) {
-        const firstLogAddress = logs[0].address;
-        console.log("First log address:", firstLogAddress);
-
-        // Check if the first log's address matches `multisigPolyAddr`
-        expect(firstLogAddress.toLowerCase()).to.equal(
-          multisigPolyAddr.toLowerCase()
-        );
-      } else {
-        throw new Error("No logs found in transaction receipt");
-      }
-
-      const contractAfter = await publicClient.getBytecode({
-        address: multisigPolyAddr,
-      });
-      console.log("Contract after:", contractAfter);
-      expect(contractAfter).to.not.equal(undefined);
-    });
+    const contractAfter = await getBytecode(multisigPolyAddr, "Contract after");
+    expect(contractAfter).to.not.equal(undefined);
   });
-
-  // expect resulting deployment address to match HARDHAT_MULTISIG_MATIC_ADDR
 });
+
+async function impersonateAccount(deployerAddr: string) {
+  await hre.network.provider.request({
+    method: "hardhat_impersonateAccount",
+    params: [deployerAddr],
+  });
+}
+
+async function getBytecode(address: `0x${string}`, logMessage: string) {
+  const publicClient = await hre.viem.getPublicClient();
+  const bytecode = await publicClient.getBytecode({ address });
+  console.log(logMessage, bytecode);
+  return bytecode;
+}
+
+async function createProxyWithNonce(
+  safeProxyContract: any,
+  singletonAddr: string,
+  initializerData: string
+) {
+  const hash = await safeProxyContract.write.createProxyWithNonce([
+    singletonAddr,
+    initializerData,
+    1697154183832n,
+  ]);
+  console.log("Deploying multisig wallet...", hash);
+  return hash;
+}
+
+async function waitForTransactionReceipt(publicClient: any, hash: string) {
+  return await publicClient.waitForTransactionReceipt({ hash });
+}
+
+function getFirstLogAddress(deployMultisigWalletTxReceipt: any) {
+  const logs = deployMultisigWalletTxReceipt.logs;
+  if (logs.length > 0) {
+    const firstLogAddress = logs[0].address;
+    console.log("First log address:", firstLogAddress);
+    return firstLogAddress;
+  } else {
+    throw new Error("No logs found in transaction receipt");
+  }
+}
